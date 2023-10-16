@@ -2,6 +2,7 @@
 ####### Identifying alert concentrations ###
 ####### by a parametric bootstrap approach ###
 ####### Author: K.Moellenhoff ###############
+######## Update: 16th of October 2023 ########
 ##############################################
 
 library(matrixStats)
@@ -10,13 +11,16 @@ library(parallel)
 library(foreach)
 library(doParallel)
 
-### Please note: You have to specify the data set by loading the file in line 20 
+## Changes/correction from 10/16: Functions bootstrap 
+## and crit_val now using standard deviation as argument 
+
+### Please note: You have to specify the data set by loading the file in line 24 
 ### The model has to be specified (up to now you can choose sigEmax or betaMod)
 ### You can adapt the code easily to other scenarios by changing the doses, the number of samples and the threshold 
 ### Further you can change the bootstrap repetitions and the significance level
-### In summary: You can modify a lot of things between line 20 and 44. Further, in line 91 you can activate/deactivate the parallelization.
+### In summary: You can modify a lot of things between line 24 and 48. Further, in line 97 you can activate/deactivate the parallelization.
 
-# load the dataset of interest
+# load the dataset of interest, e.g.
 load("DataSet.ScenarioIV.VarLarge.RData")
 
 doses <- c(0, 25, 150, 350, 450, 550, 800, 1000) #concentrations
@@ -49,10 +53,10 @@ model_name <- "betaMod"
 numCores <- detectCores()
 
 # vectors for storing the results
-lo.cf <- vector()
-crit_val <- vector()
-lec <- vector()
-result <- vector()
+lo.cf <- numeric(Nsim)
+crit_val <- numeric(Nsim)
+lec <- numeric(Nsim)
+result <- numeric(Nsim)
 conf_all <- matrix(NA,nrow=Nsim,ncol=length(grid))
 
 # data simulating function
@@ -67,40 +71,42 @@ simul <- function(theta,sd)
 }
 
 # bootstrap function returns replicates of abs(\hat Delta)
-bootstrap <- function(theta,B){
+bootstrap <- function(theta,sd,B){
   # store bootstrap results
   boot <- matrix(NA,nrow=B,ncol=length(grid))
-  theta_boot_vec<- matrix(NA,nrow=B,ncol=length(theta))
+  theta_boot_vec <- matrix(NA,nrow=B,ncol=length(theta))
+  sd_boot <- vector()
   for(m in 1:B){
-    data_boot <- simul(theta,sd=sd_est)
+    data_boot <- simul(theta,sd)
     try(mod_boot <- suppressMessages(fitMod(dose=rep(doses, each=3), resp=data_boot, model=model_name)))
     theta_boot <- unname(mod_boot$coef)
+    sd_boot[m] <- sqrt(mod_boot$RSS/mod_boot$df)
     diff_boot <- model(grid,theta_boot[1],theta_boot[2],theta_boot[3],theta_boot[4])-model(0,theta_boot[1],theta_boot[2],theta_boot[3],theta_boot[4])
     boot[m,] <- abs(diff_boot)
     theta_boot_vec[m,] <- theta_boot  
-    }
-  return(list(boot=boot,theta_boot=theta_boot_vec))
+  }
+  return(list(boot=boot,theta_boot=theta_boot_vec,sd_boot=sd_boot))
 }
 
 # this function returns the simulated values D^* 
-# NOTE: if you change do to dopar (line 91), the parallelization is activated. This only works for Linux and MacOS!
+# NOTE: if you change do to dopar, the parallelization is activated. This only works for Linux and MacOS!
 crit.val <- function(theta,B){
   D <- vector()
   Dmax <- vector()
   registerDoParallel(numCores)
   res <- foreach (m=1:B,.combine=rbind) %do% {
-    inner_boot <- bootstrap(bootst$theta_boot[m,],B=B2)$boot # inner bootstrap for estimating the SE*
+    inner_boot <- bootstrap(bootst$theta_boot[m,],sd=bootst$sd_boot[m],B=B2)$boot # inner bootstrap for estimating the SE*
     for(l in 1:length(grid)){
       fx <- model(grid[l], theta[1], theta[2], theta[3], theta[4])
       f0 <- model(0, theta[1], theta[2], theta[3], theta[4])
-    D[l] <- (boot[m,l]-abs(fx-f0))/sd(inner_boot[,l])
+      D[l] <- (boot[m,l]-abs(fx-f0))/sd(inner_boot[,l])
     }
-D
+    D
   }
   stopImplicitCluster()
   Dmax <- rowMaxs(res)
-   return(Dmax)
-  }
+  return(Dmax)
+}
 
 
 conf.bands <- function(theta){
@@ -126,7 +132,7 @@ for(i in 1:Nsim){
   mod_est <- suppressMessages(fitMod(dose=rep(doses, each=3), resp=data, model=model_name))
   sd_est <- sqrt(mod_est$RSS/mod_est$df)
   theta <- unname(coef(mod_est))
-  bootst <- bootstrap(theta=theta,B=B1) # outer bootstrap with B1 repetitions of theta and the test statistic 
+  bootst <- bootstrap(theta=theta,sd=sd_est,B=B1) # outer bootstrap with B1 repetitions of theta and the test statistic 
   boot <- bootst$boot
   crit <- crit.val(theta=theta,B=B1) # here hat D^* is simulated by performing another bootstrap (nested)
   if(all(is.na(crit)) | all(crit==-Inf)){result[i]=NA;next} # in case of numeric errors just skip this dataset 
@@ -141,4 +147,3 @@ for(i in 1:Nsim){
 
 # saving the results
 saveRDS(list(n=sum(result,na.rm=TRUE),sum.nas=sum(is.na(result)),lec=lec,conf.bands=conf_all),file="Results.rds")
-
